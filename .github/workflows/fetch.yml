@@ -14,36 +14,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download latest available monthly CSV (with relay fallback)
+      - name: Download latest available monthly CSV (robust; tries 18 months; relay + validation)
         run: |
           set -e
-          months_back=6
-          success=false
-          for ((i=0; i<months_back; i++)); do
-            month=$(date -d "-$i month" +%Y-%m)
-            url="http://landregistry.data.gov.uk/app/ppd/ppd_data_monthly_report/download?month=${month}&format=csv"
-            echo "Trying $month (primary)..."
-            if curl -f --max-time 20 -o latest.csv "$url"; then
-              success=true
-              break
-            else
-              echo "Primary failed, trying relay for $month..."
-              relay_url="https://media.githubusercontent.com/media/houseprices/ppd-mirror/main/data/${month}.csv"
-              if curl -f --max-time 20 -o latest.csv "$relay_url"; then
-                success=true
-                break
+
+          # Kaç ay geriye denenecek
+          MONTHS_BACK=18
+
+          success=""
+          for i in $(seq 0 $((MONTHS_BACK-1))); do
+            # i ay geriye YYYY-MM üret
+            Y=$(date -u -d "$(date -u +%Y-%m-01) -$i month" +%Y)
+            M=$(date -u -d "$(date -u +%Y-%m-01) -$i month" +%m)
+            YM="${Y}-${M}"
+
+            PRIMARY="https://prod.publicdata.landregistry.gov.uk/ppd/monthly/pp-${YM}.csv"
+            FALLBACK="https://landregistry.data.gov.uk/app/ppd/ppd_data_monthly_report/download?month=${YM}&format=csv"
+            R_PRIMARY="https://r.jina.ai/http://prod.publicdata.landregistry.gov.uk/ppd/monthly/pp-${YM}.csv"
+            R_FALLBACK="https://r.jina.ai/http://landregistry.data.gov.uk/app/ppd/ppd_data_monthly_report/download?month=${YM}&format=csv"
+
+            echo "=== Trying month ${YM} ==="
+
+            for U in "$PRIMARY" "$R_PRIMARY" "$FALLBACK" "$R_FALLBACK"; do
+              echo "GET $U"
+              if curl -fsSL --connect-timeout 10 --max-time 120 "$U" -o _tmp.csv ; then
+                # İçerik gerçekten CSV mi? (başlık + min boyut)
+                if head -n 1 _tmp.csv | grep -q '^Price,Date of Transfer,Postcode' && [ $(wc -c < _tmp.csv) -ge 10240 ]; then
+                  mv _tmp.csv latest.csv
+                  echo "OK: ${YM}  ($U)"
+                  success="1"
+                  break 2
+                else
+                  echo "Not a valid CSV (header/size check failed)."
+                fi
+              else
+                echo "Fetch failed."
               fi
-            fi
+            done
           done
-          if [ "$success" != true ]; then
-            echo "No monthly CSV found in last $months_back months."
+
+          if [ -z "$success" ]; then
+            echo "No valid CSV found in last ${MONTHS_BACK} months."
             exit 1
           fi
 
       - name: Commit file
         run: |
           git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.email "actions@users.noreply.github.com"
           git add latest.csv
-          git commit -m "update latest.csv" || echo "No changes to commit"
+          git commit -m "update latest.csv" || echo "no changes"
           git push
