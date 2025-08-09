@@ -1,0 +1,49 @@
+name: Mirror PPD CSV (latest)
+
+on:
+  schedule:
+    - cron: "5 6 * * *"  # her gün 06:05 UTC (TR ~09:05)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest available monthly CSV (with relay fallback)
+        run: |
+          set -e
+          months_back=6
+          success=false
+          for ((i=0; i<months_back; i++)); do
+            month=$(date -d "-$i month" +%Y-%m)
+            url="http://landregistry.data.gov.uk/app/ppd/ppd_data_monthly_report/download?month=${month}&format=csv"
+            echo "Trying $month (primary)..."
+            if curl -f --max-time 20 -o latest.csv "$url"; then
+              success=true
+              break
+            else
+              echo "Primary failed, trying relay for $month..."
+              relay_url="https://media.githubusercontent.com/media/houseprices/ppd-mirror/main/data/${month}.csv"
+              if curl -f --max-time 20 -o latest.csv "$relay_url"; then
+                success=true
+                break
+              fi
+            fi
+          done
+          if [ "$success" != true ]; then
+            echo "No monthly CSV found in last $months_back months."
+            exit 1
+          fi
+
+      - name: Commit file
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add latest.csv
+          git commit -m "update latest.csv" || echo "No changes to commit"
+          git push
